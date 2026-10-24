@@ -17,11 +17,12 @@
 // that matters is checked by Courage, not by this file.
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, chmodSync, closeSync, constants, fstatSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 const VERSION = "0.1.0";
 const COURAGE = (process.env.COURAGE_URL || "https://courage.dversio.ca").replace(/\/+$/, "");
@@ -138,37 +139,65 @@ const fresh = credentials => credentials.expires_at - Date.now() > 60_000;
 // The lock is owned by the file its holder created, not by its path: a holder that was paused (a laptop asleep) past the
 // stale window may find a successor's lock at the path, and then touches, removes and spends nothing. `work` gets an
 // owns() check to make right before spending the refresh token.
-async function with_refresh_lock(work) {
+//
+// Taking the lock is an exclusive create, which only succeeds on an empty path. Every removal of the lock (a holder
+// releasing it, a waiter clearing a dead holder's) happens under a short guard (REFRESH_GUARD), where checking which file
+// is at the path and removing it is one synchronous step: no one else can remove or replace the lock in between.
+export async function with_refresh_lock(work) {
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
   for (const started = Date.now(); ;) {
     let fd;
     try { fd = openSync(REFRESH_LOCK, "wx", 0o600); }
     catch (error) {
       if (error.code !== "EEXIST") throw error;
-      take_stale_lock();
+      let seen;
+      try { seen = statSync(REFRESH_LOCK); } catch {}
+      if (seen) take_stale_lock(seen);
       if (Date.now() - started > LOCK_STALE_MS * 2) throw new Error("another courage-session is still refreshing; retrying later");
       await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
       continue;
     }
     const mine = fstatSync(fd);
-    const owns = () => { try { const held = statSync(REFRESH_LOCK); return held.ino === mine.ino && held.dev === mine.dev; } catch { return false; } };
+    const owns = () => same_file(mine);
     const heartbeat = setInterval(() => { try { if (owns()) { const now = new Date(); utimesSync(REFRESH_LOCK, now, now); } } catch {} }, LOCK_HEARTBEAT_MS);
-    try { return await work(owns); } finally { clearInterval(heartbeat); closeSync(fd); try { if (owns()) unlinkSync(REFRESH_LOCK); } catch {} }
+    try { return await work(owns); } finally {
+      clearInterval(heartbeat); closeSync(fd);
+      // Released under the guard, and only if it is still ours; if the guard stays busy, the lock goes stale instead.
+      for (let tries = 0; tries < 50 && with_guard(() => { if (owns()) unlinkSync(REFRESH_LOCK); }) === GUARD_BUSY; tries++) await new Promise(resolve => setTimeout(resolve, 20));
+    }
   }
 }
 
-// Removes a lock left by a relay that died: moved aside first, and put back if what moved turned out to be a newer lock
-// (two waiters judging the same stale lock at once), so a waiter never deletes a live successor's lock.
-function take_stale_lock() {
-  let stale;
-  try { stale = statSync(REFRESH_LOCK); } catch { return; }
-  if (Date.now() - stale.mtimeMs <= LOCK_STALE_MS) return;
-  const aside = `${REFRESH_LOCK}.${process.pid}.${randomBytes(4).toString("hex")}`;
-  try { renameSync(REFRESH_LOCK, aside); } catch { return; }
-  try {
-    const moved = statSync(aside);
-    if (moved.ino !== stale.ino || moved.dev !== stale.dev) { try { linkSync(aside, REFRESH_LOCK); } catch {} }
-  } finally { try { unlinkSync(aside); } catch {} }
+const REFRESH_GUARD = join(HOME, "refresh.guard");
+// A guard is held for a few synchronous file operations; one this old belongs to a process that died holding it.
+const GUARD_STALE_MS = 10_000;
+const GUARD_BUSY = Symbol("busy");
+
+function same_file(held) {
+  try { const now = statSync(REFRESH_LOCK); return now.ino === held.ino && now.dev === held.dev; } catch { return false; }
+}
+
+// Runs `step` (synchronous) holding the guard, or returns GUARD_BUSY.
+export function with_guard(step) {
+  let fd;
+  try { fd = openSync(REFRESH_GUARD, "wx", 0o600); }
+  catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    try { if (Date.now() - statSync(REFRESH_GUARD).mtimeMs > GUARD_STALE_MS) unlinkSync(REFRESH_GUARD); } catch {}
+    return GUARD_BUSY;
+  }
+  try { return step(); } finally { closeSync(fd); try { unlinkSync(REFRESH_GUARD); } catch {} }
+}
+
+// Clears the lock `seen` (a waiter's earlier look at it) only if, under the guard, that same file is still at the path
+// and still stale: a newer lock that replaced it is never touched.
+export function take_stale_lock(seen) {
+  return with_guard(() => {
+    if (!same_file(seen)) return false;
+    if (Date.now() - statSync(REFRESH_LOCK).mtimeMs <= LOCK_STALE_MS) return false;
+    unlinkSync(REFRESH_LOCK);
+    return true;
+  }) === true;
 }
 
 const SIGN_IN_EXPIRED = "Courage sign-in expired; run courage-session login";
@@ -375,9 +404,13 @@ async function doctor() {
   return rows.every(row => row.startsWith("ok"));
 }
 
+// Run as a command (directly, or through a launcher and Homebrew's opt symlink); imported, it only defines the helpers
+// above (tests).
+const is_main = (() => { try { return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } })();
 const command = process.argv[2];
 const fail = error => { log(error.message); process.exit(1); };
-if (command === "login") login().catch(fail);
+if (!is_main) { /* imported */ }
+else if (command === "login") login().catch(fail);
 else if (command === "channel") channel();
 else if (command === "setup") setup().catch(fail);
 else if (command === "doctor") doctor().then(ok => process.exit(ok ? 0 : 1), fail);

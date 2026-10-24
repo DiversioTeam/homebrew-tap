@@ -9,6 +9,9 @@ version="${COURAGE_SESSION_VERSION:-0.1.0}"
 source="${COURAGE_SESSION_SOURCE:-https://raw.githubusercontent.com/DiversioTeam/homebrew-tap/courage-session-v$version/courage-session}"
 bin_dir="${COURAGE_SESSION_BIN_DIR:-$HOME/.local/bin}"
 share_dir="${COURAGE_SESSION_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/courage-session}"
+# The published files' SHA-256, written in by the release script. An unpublished copy installs only from a local directory.
+relay_sha256="2687d86b82be2c4b911831d31813d9208dad8039ba69b002118752b940229443"
+claudec_sha256="f9019f3c062cd5f18efd0dd927ff3ed0ff0aabf9f514cf091a66f4bd3ba91b81"
 
 fail() { echo "courage-session install: $*" >&2; exit 1; }
 
@@ -25,15 +28,24 @@ fetch() {
   esac
 }
 
+case "$relay_sha256:$source" in
+  unpublished:/*) ;;
+  unpublished:*) fail "this copy of install.sh was not published; use the one from the homebrew-tap repository." ;;
+esac
+sha256() { "$node_path" -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
+
 mkdir -p "$bin_dir" "$share_dir"
 # Everything is downloaded and checked before anything installed is replaced, so a bad download leaves a working install.
 fetch courage-session.mjs "$share_dir/courage-session.new.mjs"
 fetch claudec "$bin_dir/claudec.new"
-downloaded="$("$node_path" "$share_dir/courage-session.new.mjs" --version || true)"
-if [ "$downloaded" != "$version" ]; then
-  rm -f "$share_dir/courage-session.new.mjs" "$bin_dir/claudec.new"
-  fail "downloaded version ${downloaded:-unknown}, expected $version; nothing was changed."
+discard() { rm -f "$share_dir/courage-session.new.mjs" "$bin_dir/claudec.new"; fail "$1; nothing was changed."; }
+if [ "$relay_sha256" != "unpublished" ]; then
+  [ "$(sha256 "$share_dir/courage-session.new.mjs")" = "$relay_sha256" ] || discard "the downloaded relay does not match its published checksum"
+  [ "$(sha256 "$bin_dir/claudec.new")" = "$claudec_sha256" ] || discard "the downloaded claudec does not match its published checksum"
 fi
+sh -n "$bin_dir/claudec.new" || discard "the downloaded claudec is not a valid shell script"
+downloaded="$("$node_path" "$share_dir/courage-session.new.mjs" --version || true)"
+[ "$downloaded" = "$version" ] || discard "downloaded version ${downloaded:-unknown}, expected $version"
 mv "$share_dir/courage-session.new.mjs" "$share_dir/courage-session.mjs"
 chmod 755 "$bin_dir/claudec.new"
 mv "$bin_dir/claudec.new" "$bin_dir/claudec"
