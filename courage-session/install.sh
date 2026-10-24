@@ -10,7 +10,7 @@ source="${COURAGE_SESSION_SOURCE:-https://raw.githubusercontent.com/DiversioTeam
 bin_dir="${COURAGE_SESSION_BIN_DIR:-$HOME/.local/bin}"
 share_dir="${COURAGE_SESSION_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/courage-session}"
 # The published files' SHA-256, written in by the release script. An unpublished copy installs only from a local directory.
-relay_sha256="2687d86b82be2c4b911831d31813d9208dad8039ba69b002118752b940229443"
+relay_sha256="b9fbae61ac746a04267e68f71fac67878cfc521d89d48cbc2d56530af16812ba"
 claudec_sha256="f9019f3c062cd5f18efd0dd927ff3ed0ff0aabf9f514cf091a66f4bd3ba91b81"
 
 fail() { echo "courage-session install: $*" >&2; exit 1; }

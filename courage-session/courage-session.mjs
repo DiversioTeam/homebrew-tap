@@ -17,8 +17,9 @@
 // that matters is checked by Courage, not by this file.
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as create_tcp_server } from "node:net";
 import { homedir, hostname } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -34,17 +35,17 @@ const MCP_CONFIG = join(HOME, "mcp.json");
 // this file from a checkout.
 const LAUNCHER = process.env.COURAGE_SESSION_LAUNCHER;
 const SELF = LAUNCHER ? "courage-session" : `node ${process.argv[1]}`;
-// Held while one relay refreshes; every session on this machine shares the credentials, and Courage revokes the whole grant
-// when a spent refresh token is used twice.
-const REFRESH_LOCK = join(HOME, "refresh.lock");
-// A lock whose mtime is older than this belongs to a relay that died. The owner touches it this often, and the token
-// request gives up well inside the window, so a live owner's lock is never taken for stale. (The COURAGE_SESSION_TEST_*
-// overrides only scale these down for tests.)
+// Held while one relay refreshes: every session on this machine shares the credentials, and Courage revokes the whole
+// grant when a spent refresh token is used twice. The lock is a loopback port only one live process can listen on, so the
+// operating system keeps it exclusive and frees it the moment its holder dies; a holder that is stopped or asleep still
+// holds it. No lock files, so nothing stale to clear. The port comes from this config directory, below the ephemeral
+// range, or COURAGE_SESSION_LOCK_PORT. (The COURAGE_SESSION_TEST_* overrides only scale timings down for tests.)
 const scaled = (name, value) => Number(process.env[`COURAGE_SESSION_TEST_${name}`]) || value;
-const LOCK_STALE_MS = scaled("LOCK_STALE_MS", 30_000);
-const LOCK_HEARTBEAT_MS = scaled("LOCK_HEARTBEAT_MS", 5_000);
+const LOCK_PORT = Number(process.env.COURAGE_SESSION_LOCK_PORT) || 20_000 + parseInt(createHash("sha256").update(resolve(HOME)).digest("hex").slice(0, 8), 16) % 10_000;
+// How long a relay waits for another to finish refreshing before trying again later.
+const LOCK_WAIT_MS = scaled("LOCK_WAIT_MS", 60_000);
 const TOKEN_TIMEOUT_MS = scaled("TOKEN_TIMEOUT_MS", 20_000);
-// Tests only: freeze a lock holder once (timers included, like a sleeping laptop) before it checks it still holds the lock.
+// Tests only: freeze a lock holder once (timers included, like a sleeping laptop) before it refreshes.
 let test_pause_ms = scaled("PAUSE_MS", 0);
 const HARNESS = ["Claude Code", "Pi", "Codex"].includes(process.env.COURAGE_SESSION_HARNESS) ? process.env.COURAGE_SESSION_HARNESS : "Claude Code";
 const NAME = (process.env.COURAGE_SESSION_NAME || `${hostname().split(".")[0]}/${basename(process.cwd())}`).replace(/[^A-Za-z0-9._/-]/g, "-").slice(0, 60);
@@ -136,68 +137,23 @@ const fresh = credentials => credentials.expires_at - Date.now() > 60_000;
 // One refresher at a time across processes: an exclusive lock file (O_EXCL), broken when older than its stale timeout
 // (a relay that died holding it). Whoever gets it re-reads the credentials first and refreshes only if they are still
 // expired, so a refresh token is never spent twice.
-// The lock is owned by the file its holder created, not by its path: a holder that was paused (a laptop asleep) past the
-// stale window may find a successor's lock at the path, and then touches, removes and spends nothing. `work` gets an
-// owns() check to make right before spending the refresh token.
-//
-// Taking the lock is an exclusive create, which only succeeds on an empty path. Every removal of the lock (a holder
-// releasing it, a waiter clearing a dead holder's) happens under a short guard (REFRESH_GUARD), where checking which file
-// is at the path and removing it is one synchronous step: no one else can remove or replace the lock in between.
+// Runs `work` holding the refresh lock, waiting for another relay that holds it.
 export async function with_refresh_lock(work) {
-  mkdirSync(HOME, { recursive: true, mode: 0o700 });
   for (const started = Date.now(); ;) {
-    let fd;
-    try { fd = openSync(REFRESH_LOCK, "wx", 0o600); }
-    catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      let seen;
-      try { seen = statSync(REFRESH_LOCK); } catch {}
-      if (seen) take_stale_lock(seen);
-      if (Date.now() - started > LOCK_STALE_MS * 2) throw new Error("another courage-session is still refreshing; retrying later");
-      await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
-      continue;
-    }
-    const mine = fstatSync(fd);
-    const owns = () => same_file(mine);
-    const heartbeat = setInterval(() => { try { if (owns()) { const now = new Date(); utimesSync(REFRESH_LOCK, now, now); } } catch {} }, LOCK_HEARTBEAT_MS);
-    try { return await work(owns); } finally {
-      clearInterval(heartbeat); closeSync(fd);
-      // Released under the guard, and only if it is still ours; if the guard stays busy, the lock goes stale instead.
-      for (let tries = 0; tries < 50 && with_guard(() => { if (owns()) unlinkSync(REFRESH_LOCK); }) === GUARD_BUSY; tries++) await new Promise(resolve => setTimeout(resolve, 20));
-    }
+    const held = await take_lock();
+    if (held) { try { return await work(); } finally { await new Promise(resolve => held.close(() => resolve())); } }
+    if (Date.now() - started > LOCK_WAIT_MS) throw new Error("another courage-session is still refreshing; retrying later");
+    await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
   }
 }
 
-const REFRESH_GUARD = join(HOME, "refresh.guard");
-// A guard is held for a few synchronous file operations; one this old belongs to a process that died holding it.
-const GUARD_STALE_MS = 10_000;
-const GUARD_BUSY = Symbol("busy");
-
-function same_file(held) {
-  try { const now = statSync(REFRESH_LOCK); return now.ino === held.ino && now.dev === held.dev; } catch { return false; }
-}
-
-// Runs `step` (synchronous) holding the guard, or returns GUARD_BUSY.
-export function with_guard(step) {
-  let fd;
-  try { fd = openSync(REFRESH_GUARD, "wx", 0o600); }
-  catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    try { if (Date.now() - statSync(REFRESH_GUARD).mtimeMs > GUARD_STALE_MS) unlinkSync(REFRESH_GUARD); } catch {}
-    return GUARD_BUSY;
-  }
-  try { return step(); } finally { closeSync(fd); try { unlinkSync(REFRESH_GUARD); } catch {} }
-}
-
-// Clears the lock `seen` (a waiter's earlier look at it) only if, under the guard, that same file is still at the path
-// and still stale: a newer lock that replaced it is never touched.
-export function take_stale_lock(seen) {
-  return with_guard(() => {
-    if (!same_file(seen)) return false;
-    if (Date.now() - statSync(REFRESH_LOCK).mtimeMs <= LOCK_STALE_MS) return false;
-    unlinkSync(REFRESH_LOCK);
-    return true;
-  }) === true;
+// The port, or undefined when another process holds it. Nothing is ever served on it: connections are dropped.
+export function take_lock() {
+  return new Promise((resolve, reject) => {
+    const server = create_tcp_server(socket => socket.destroy());
+    server.once("error", error => error.code === "EADDRINUSE" ? resolve(undefined) : reject(error));
+    server.listen({ port: LOCK_PORT, host: "127.0.0.1", exclusive: true }, () => { server.unref(); resolve(server); });
+  });
 }
 
 const SIGN_IN_EXPIRED = "Courage sign-in expired; run courage-session login";
@@ -207,14 +163,12 @@ async function access_token() {
   if (!credentials?.refresh_token) throw new Error(`not signed in; run: ${SELF} login`);
   if (credentials.sign_in_required) throw new Error(SIGN_IN_EXPIRED);
   if (fresh(credentials)) return credentials.access_token;
-  return with_refresh_lock(async owns => {
+  return with_refresh_lock(async () => {
     const current = read_credentials();
     if (!current?.refresh_token) throw new Error(`not signed in; run: ${SELF} login`);
     if (current.sign_in_required) throw new Error(SIGN_IN_EXPIRED);
     if (fresh(current)) return current.access_token;
     if (test_pause_ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, test_pause_ms); test_pause_ms = 0; }
-    // Still the holder, checked last: a holder that slept past the stale window leaves the token to its successor.
-    if (!owns()) throw new Error("another courage-session took over the refresh; retrying later");
     try {
       const tokens = await form(`${COURAGE}/oauth/token`, { grant_type: "refresh_token", refresh_token: current.refresh_token, client_id: current.client_id,
         resource: `${COURAGE}/mcp` });
