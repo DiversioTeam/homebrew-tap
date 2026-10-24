@@ -1,0 +1,11 @@
+#!/bin/sh
+# claudec: Claude Code that Courage can reach from Slack ("@Courage send to my terminal: …", "Continue in CLI").
+# Same arguments as claude. Each session is named <host>/<folder>, so separate worktrees show up separately.
+# Run `courage-session setup` once first.
+config="${COURAGE_SESSION_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/courage-session}/mcp.json"
+if [ ! -f "$config" ]; then
+  echo "claudec: run 'courage-session setup' first" >&2
+  exit 1
+fi
+# Channels are a Claude Code research preview: they need the legacy MCP handshake and the development-channels flag.
+MCP_PROTOCOL_NEGOTIATION=legacy exec claude --mcp-config "$config" --dangerously-load-development-channels server:courage-session "$@"
