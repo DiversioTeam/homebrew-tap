@@ -17,7 +17,7 @@
 // that matters is checked by Courage, not by this file.
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, chmodSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, fstatSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, hostname } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
@@ -43,6 +43,8 @@ const scaled = (name, value) => Number(process.env[`COURAGE_SESSION_TEST_${name}
 const LOCK_STALE_MS = scaled("LOCK_STALE_MS", 30_000);
 const LOCK_HEARTBEAT_MS = scaled("LOCK_HEARTBEAT_MS", 5_000);
 const TOKEN_TIMEOUT_MS = scaled("TOKEN_TIMEOUT_MS", 20_000);
+// Tests only: freeze a lock holder once (timers included, like a sleeping laptop) before it checks it still holds the lock.
+let test_pause_ms = scaled("PAUSE_MS", 0);
 const HARNESS = ["Claude Code", "Pi", "Codex"].includes(process.env.COURAGE_SESSION_HARNESS) ? process.env.COURAGE_SESSION_HARNESS : "Claude Code";
 const NAME = (process.env.COURAGE_SESSION_NAME || `${hostname().split(".")[0]}/${basename(process.cwd())}`).replace(/[^A-Za-z0-9._/-]/g, "-").slice(0, 60);
 const log = line => process.stderr.write(`courage-session: ${line}\n`);
@@ -133,6 +135,9 @@ const fresh = credentials => credentials.expires_at - Date.now() > 60_000;
 // One refresher at a time across processes: an exclusive lock file (O_EXCL), broken when older than its stale timeout
 // (a relay that died holding it). Whoever gets it re-reads the credentials first and refreshes only if they are still
 // expired, so a refresh token is never spent twice.
+// The lock is owned by the file its holder created, not by its path: a holder that was paused (a laptop asleep) past the
+// stale window may find a successor's lock at the path, and then touches, removes and spends nothing. `work` gets an
+// owns() check to make right before spending the refresh token.
 async function with_refresh_lock(work) {
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
   for (const started = Date.now(); ;) {
@@ -140,14 +145,30 @@ async function with_refresh_lock(work) {
     try { fd = openSync(REFRESH_LOCK, "wx", 0o600); }
     catch (error) {
       if (error.code !== "EEXIST") throw error;
-      try { if (Date.now() - statSync(REFRESH_LOCK).mtimeMs > LOCK_STALE_MS) unlinkSync(REFRESH_LOCK); } catch {}
+      take_stale_lock();
       if (Date.now() - started > LOCK_STALE_MS * 2) throw new Error("another courage-session is still refreshing; retrying later");
       await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
       continue;
     }
-    const heartbeat = setInterval(() => { try { const now = new Date(); utimesSync(REFRESH_LOCK, now, now); } catch {} }, LOCK_HEARTBEAT_MS);
-    try { return await work(); } finally { clearInterval(heartbeat); closeSync(fd); try { unlinkSync(REFRESH_LOCK); } catch {} }
+    const mine = fstatSync(fd);
+    const owns = () => { try { const held = statSync(REFRESH_LOCK); return held.ino === mine.ino && held.dev === mine.dev; } catch { return false; } };
+    const heartbeat = setInterval(() => { try { if (owns()) { const now = new Date(); utimesSync(REFRESH_LOCK, now, now); } } catch {} }, LOCK_HEARTBEAT_MS);
+    try { return await work(owns); } finally { clearInterval(heartbeat); closeSync(fd); try { if (owns()) unlinkSync(REFRESH_LOCK); } catch {} }
   }
+}
+
+// Removes a lock left by a relay that died: moved aside first, and put back if what moved turned out to be a newer lock
+// (two waiters judging the same stale lock at once), so a waiter never deletes a live successor's lock.
+function take_stale_lock() {
+  let stale;
+  try { stale = statSync(REFRESH_LOCK); } catch { return; }
+  if (Date.now() - stale.mtimeMs <= LOCK_STALE_MS) return;
+  const aside = `${REFRESH_LOCK}.${process.pid}.${randomBytes(4).toString("hex")}`;
+  try { renameSync(REFRESH_LOCK, aside); } catch { return; }
+  try {
+    const moved = statSync(aside);
+    if (moved.ino !== stale.ino || moved.dev !== stale.dev) { try { linkSync(aside, REFRESH_LOCK); } catch {} }
+  } finally { try { unlinkSync(aside); } catch {} }
 }
 
 const SIGN_IN_EXPIRED = "Courage sign-in expired; run courage-session login";
@@ -157,11 +178,14 @@ async function access_token() {
   if (!credentials?.refresh_token) throw new Error(`not signed in; run: ${SELF} login`);
   if (credentials.sign_in_required) throw new Error(SIGN_IN_EXPIRED);
   if (fresh(credentials)) return credentials.access_token;
-  return with_refresh_lock(async () => {
+  return with_refresh_lock(async owns => {
     const current = read_credentials();
     if (!current?.refresh_token) throw new Error(`not signed in; run: ${SELF} login`);
     if (current.sign_in_required) throw new Error(SIGN_IN_EXPIRED);
     if (fresh(current)) return current.access_token;
+    if (test_pause_ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, test_pause_ms); test_pause_ms = 0; }
+    // Still the holder, checked last: a holder that slept past the stale window leaves the token to its successor.
+    if (!owns()) throw new Error("another courage-session took over the refresh; retrying later");
     try {
       const tokens = await form(`${COURAGE}/oauth/token`, { grant_type: "refresh_token", refresh_token: current.refresh_token, client_id: current.client_id,
         resource: `${COURAGE}/mcp` });
@@ -296,14 +320,18 @@ const COURAGE_SIGN_IN = "Run claude mcp login courage in a terminal, or in claud
 
 async function setup() {
   if (!node_ok()) throw new Error(`Node ${process.versions.node} is too old; courage-session needs Node 20 or later.`);
-  const server = courage_server();
-  if (server === "no_claude") say("- Claude Code is not installed (no claude on PATH); install it, then run setup again.");
-  else if (server === "missing") {
+  // Always at user scope, so every project has it: claude mcp get shows whichever scope wins in this folder (a project's
+  // own .mcp.json or a local one), so the user-scope add is tried every time and "already exists" means done.
+  if (!on_path("claude")) say("- Claude Code is not installed (no claude on PATH); install it, then run setup again.");
+  else {
     const added = claude("mcp", "add", "--transport", "http", "--scope", "user", "courage", `${COURAGE}/mcp`);
-    if (added.status !== 0) throw new Error(`claude mcp add failed: ${(added.stderr || added.stdout).trim()}`);
-    say(`- Added the courage MCP server to Claude Code (user scope, ${COURAGE}/mcp).`);
-  } else if (server === "other_url") say(`- Claude Code already has a server named courage at another address; leaving it. Courage is ${COURAGE}/mcp.`);
-  else say("- Claude Code already has the courage MCP server.");
+    const output = `${added.stdout}${added.stderr}`.trim();
+    if (added.status === 0) say(`- Added the courage MCP server to Claude Code (user scope, ${COURAGE}/mcp).`);
+    else if (/already exists in user config/.test(output)) say("- Claude Code already has the courage MCP server (user scope).");
+    else throw new Error(`claude mcp add failed: ${output}`);
+  }
+  const server = courage_server();
+  if (server === "other_url") say(`- Here, a project or local server named courage points elsewhere and takes precedence; Courage is ${COURAGE}/mcp.`);
   const config = channel_config();
   let current;
   try { current = readFileSync(MCP_CONFIG, "utf8"); } catch {}
