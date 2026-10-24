@@ -26,13 +26,17 @@ fetch() {
 }
 
 mkdir -p "$bin_dir" "$share_dir"
-fetch courage-session.mjs "$share_dir/courage-session.mjs.new"
+# Everything is downloaded and checked before anything installed is replaced, so a bad download leaves a working install.
+fetch courage-session.mjs "$share_dir/courage-session.new.mjs"
 fetch claudec "$bin_dir/claudec.new"
-mv "$share_dir/courage-session.mjs.new" "$share_dir/courage-session.mjs"
+downloaded="$("$node_path" "$share_dir/courage-session.new.mjs" --version || true)"
+if [ "$downloaded" != "$version" ]; then
+  rm -f "$share_dir/courage-session.new.mjs" "$bin_dir/claudec.new"
+  fail "downloaded version ${downloaded:-unknown}, expected $version; nothing was changed."
+fi
+mv "$share_dir/courage-session.new.mjs" "$share_dir/courage-session.mjs"
 chmod 755 "$bin_dir/claudec.new"
 mv "$bin_dir/claudec.new" "$bin_dir/claudec"
-installed="$("$node_path" "$share_dir/courage-session.mjs" --version)"
-[ "$installed" = "$version" ] || fail "downloaded version $installed, expected $version."
 
 # The node found now, so a project's older default node cannot run the relay; plain node if that one goes away.
 cat > "$bin_dir/courage-session.new" <<SH
