@@ -1,7 +1,7 @@
 class CourageSession < Formula
   desc "Send Slack messages into your Claude Code session via Diversio's Courage"
   homepage "https://github.com/DiversioTeam/homebrew-tap/tree/main/courage-session"
-  url "https://github.com/DiversioTeam/homebrew-tap.git", tag: "courage-session-v0.1.0", revision: "0ede22c43ef90fed86c4ff4152f28211f06e8b40", using: :git
+  url "https://github.com/DiversioTeam/homebrew-tap.git", tag: "courage-session-v0.1.1", using: :git
   license "MIT"
 
   depends_on "node"

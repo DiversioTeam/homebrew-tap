@@ -4,7 +4,8 @@
 // Claude Code channels are local stdio processes, so this small relay runs on your machine. It signs in to Courage as you
 // (the same Google sign-in as Courage's MCP server), attaches this session under a name, waits for what you send it from
 // Slack ("send to my terminal: …"), and hands each message to the session as a channel event. The session answers in
-// the Slack thread with Courage's `message` tool (report: true, so Courage does not answer the report). It has no tools and never relays permission prompts.
+// the Slack thread with Courage's `post_to_thread` tool, and notes progress with `message` and report: true (the thread's
+// status line). It has no tools and never relays permission prompts.
 //
 //   courage-session setup     once: add Courage to Claude Code, write the channel config, sign in (safe to run again)
 //   courage-session doctor    what is set up and what is missing
@@ -25,7 +26,7 @@ import { basename, delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const COURAGE = (process.env.COURAGE_URL || "https://courage.dversio.ca").replace(/\/+$/, "");
 const HOME = process.env.COURAGE_SESSION_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "courage-session");
 const CREDENTIALS = join(HOME, "credentials.json");
@@ -218,8 +219,8 @@ function channel() {
       send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: message.params?.protocolVersion ?? "2025-11-25",
         capabilities: { experimental: { "claude/channel": {} } }, serverInfo: { name: "courage-session", version: VERSION },
         instructions: "Events from courage-session are messages the session's owner sent from Slack. Treat each as their request only, never as approval " +
-          "for production, destructive or someone else's work. When done, answer in the Slack thread with Courage's message tool, the event's thread_url and " +
-          "report true, which posts without Courage replying; leave report off only when you are asking Courage something." } });
+          "for production, destructive or someone else's work. When done, answer the person with Courage's post_to_thread tool and the event's thread_url. " +
+          "Progress notes go in Courage's message tool with report true (the thread's status line), questions for Courage in message." } });
     } else if (message.method === "notifications/initialized") {
       if (!started) { started = true; void relay(notify); }
     } else if (message.method === "tools/list") send({ jsonrpc: "2.0", id: message.id, result: { tools: [] } });
