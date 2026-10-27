@@ -26,7 +26,7 @@ import { basename, delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const COURAGE = (process.env.COURAGE_URL || "https://courage.dversio.ca").replace(/\/+$/, "");
 const HOME = process.env.COURAGE_SESSION_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "courage-session");
 const CREDENTIALS = join(HOME, "credentials.json");

@@ -1,9 +1,8 @@
 class CourageSession < Formula
   desc "Send Slack messages into your Claude Code session via Diversio's Courage"
   homepage "https://github.com/DiversioTeam/homebrew-tap/tree/main/courage-session"
-  url "https://github.com/DiversioTeam/homebrew-tap.git", tag: "courage-session-v0.1.1", revision: "daf4850f2038c3a936e66805633a687c9b8aeb34", using: :git
+  url "https://github.com/DiversioTeam/homebrew-tap.git", tag: "courage-session-v0.1.2", using: :git
   license "MIT"
-  revision 1
   # No depends_on "node": Homebrew's node would be linked into its bin and take over the node people manage with pnpm.
   # The launcher runs the person's own node instead, and says how to get one if it is missing or too old.
   def install
