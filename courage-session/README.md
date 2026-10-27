@@ -15,6 +15,10 @@ macOS or Linux with Homebrew:
 brew install diversioteam/tap/courage-session
 ```
 
+It runs on your own Node 20 or later (the one you manage with pnpm: `pnpm env use --global 20`); Homebrew installs no
+Node for it. 0.1.0 did, and its node took over `node` on your `PATH`: `brew unlink node` (or `brew uninstall node` if
+nothing else needs it) gives pnpm's back.
+
 Without Homebrew (needs Node 20 or later and curl; installs to `~/.local/bin`):
 
 ```sh
