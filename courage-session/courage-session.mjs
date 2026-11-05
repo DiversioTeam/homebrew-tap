@@ -26,7 +26,7 @@ import { basename, delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.3";
 const COURAGE = (process.env.COURAGE_URL || "https://courage.dversio.ca").replace(/\/+$/, "");
 const HOME = process.env.COURAGE_SESSION_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "courage-session");
 const CREDENTIALS = join(HOME, "credentials.json");
@@ -229,15 +229,28 @@ function channel() {
   }).on("close", () => process.exit(0));
 }
 
-// Attach, then wait for deliveries forever; back off on errors, and stop with one notice when sign-in is needed.
+// Attach, then wait for deliveries forever; back off on errors, and stop with one notice when sign-in is needed. Each poll
+// acknowledges the ids the previous one handed over; Courage hands over again anything not acknowledged (a lost
+// response), so ids already passed to the session are skipped.
 async function relay(notify) {
-  let session, failures = 0;
+  let session, failures = 0, ack = [];
+  const seen = new Set();
   for (;;) {
     try {
       // The labels Slack's Continue in CLI picker shows: "Claude Code · laptop · courage".
-      session ??= (await call("session_attach", { name: NAME, harness: HARNESS, host: hostname().split(".")[0], repo: basename(process.cwd()) })).session;
-      const { deliveries } = await call("session_poll", { session, wait_seconds: 50 });
-      for (const delivery of deliveries) notify(delivery.content, delivery.meta);
+      if (!session) {
+        session = (await call("session_attach", { name: NAME, harness: HARNESS, host: hostname().split(".")[0], repo: basename(process.cwd()) })).session;
+        ack = [];
+      }
+      const { deliveries } = await call("session_poll", { session, wait_seconds: 50, ack });
+      ack = [];
+      for (const delivery of deliveries) {
+        const id = delivery.meta?.delivery_id;
+        if (id !== undefined) ack.push(Number(id));
+        if (id !== undefined && seen.has(id)) continue;
+        if (id !== undefined) { seen.add(id); if (seen.size > 1000) seen.delete(seen.values().next().value); }
+        notify(delivery.content, delivery.meta);
+      }
       failures = 0;
     } catch (error) {
       if (/not signed in|sign in again/.test(error.message)) { notify(`courage-session is not signed in, so messages from Slack cannot reach this session. Run: ${SELF} login`, { source: "courage_session" }); return; }
