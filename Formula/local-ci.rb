@@ -1,25 +1,25 @@
 class LocalCi < Formula
   desc "Shared local CI runner for repo-owned verification steps"
   homepage "https://github.com/DiversioTeam/local-ci-runner"
-  version "0.5.0"
+  version "0.5.1"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.0/local-ci_0.5.0_darwin_arm64.tar.gz"
-      sha256 "e1c8707fbfd1e1b0905930232324d257414ed241dfea65697797dbd8696da388"
+      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.1/local-ci_0.5.1_darwin_arm64.tar.gz"
+      sha256 "e8d569afeb5518b4763989c9bdf51f8a79730d6723c151968e55ad68027a3867"
     else
-      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.0/local-ci_0.5.0_darwin_amd64.tar.gz"
-      sha256 "1b90482dce567598bb52e974cf323dc8c04c2b4ba77f763f2b8570f15d5c75a2"
+      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.1/local-ci_0.5.1_darwin_amd64.tar.gz"
+      sha256 "7c2a269b5ae7f3ec544baf43f49f891fc7fc346b8a5f30d36d895bc549c75acd"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.0/local-ci_0.5.0_linux_arm64.tar.gz"
-      sha256 "faf5fdfe512d6651488e80c168b7a15ec649b9e45e7128bb8eac75c483c58102"
+      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.1/local-ci_0.5.1_linux_arm64.tar.gz"
+      sha256 "d7ca8eb9021d23e04650863b2e4100588006e33094e79230ef4c4a35fc575784"
     else
-      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.0/local-ci_0.5.0_linux_amd64.tar.gz"
-      sha256 "e6b3fccc8625dbc19fd5c98d2ca2903cf4c7581050792b5803597053a5d6be87"
+      url "https://github.com/DiversioTeam/local-ci-runner/releases/download/v0.5.1/local-ci_0.5.1_linux_amd64.tar.gz"
+      sha256 "4664460b5c50c98b012fc4c5ca1d2e89ef2748809e012e59517b2f48ef13e3ee"
     end
   end
 
